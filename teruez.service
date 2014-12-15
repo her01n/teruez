@@ -1,0 +1,8 @@
+[Unit]
+Description=Teruez Web Server
+
+[Service]
+ExecStart=/usr/local/bin/teruez
+
+[Install]
+WantedBy=multi-user.target

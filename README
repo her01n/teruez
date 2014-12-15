@@ -1,0 +1,13 @@
+Teruez is simple, linux only, not configurable web server.
+
+BUILD
+
+To build, you need make and gcc. make && make install should work.
+There are no required libraries or configuration.
+
+USAGE
+
+Run teruez executable. or use the provided systemd service file.
+For example: systemctl start teruez
+It serves files from under '/var/www' directory on port 80.
+

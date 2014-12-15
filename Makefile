@@ -26,6 +26,10 @@ clean:
 
 install:
 	install build/teruez /usr/local/bin/teruez
+	install teruez.service /usr/lib/systemd/system/teruez.service
+	systemctl daemon-reload
 
 uninstall:
 	rm -rf /usr/local/bin/teruez
+	rm -rf /usr/lib/systemd/system/teruez.service
+
