@@ -73,7 +73,7 @@ static void fillfds(connection* con, struct pollfd* fds) {
     }
 }
 
-static const char* base = "/var/www/html/";
+static const char* base = "/var/www/";
 static const char* index_file = "index.html";
 
 static char* now() {
@@ -107,8 +107,7 @@ static void respond(connection *con, int code, char* response,
 }
 
 static void error_respond(connection* con, int code, char* response, char* content) {
-    fprintf(stderr, "Error, tcp socket: %d\n", con->tcp);
-    fprintf(stderr, "Sending %d %s\n%s\n", code, response, content);
+    fprintf(stderr, "Error, Sending %d %s:%s\n", code, response, content);
     respond(con, code, response, "text/plain", strlen(content), content);
 }
 
@@ -165,8 +164,10 @@ static char* take_line(char* src) {
 
 static void work(connection* con) {
     if (con->tcp == -1) {
-        // ignored
-    } else if (con->response != NULL) {
+        return;
+    }
+    int eof = 0; // client closed connection
+    if (con->response != NULL) {
         int r = write(con->tcp, 
                 con->response + con->response_written, 
                 con->response_size - con->response_written);
@@ -195,78 +196,92 @@ static void work(connection* con) {
             }
         }
     } else {
-        // TODO what if i have more than one request read at once?
         int r = copy(&con->request, con->tcp);
         if (r < 0) {
             error_reset(con, "Failed to read request %s\n", strerror(errno));
+        } else if (r == 0) {
+            eof = 1;
+        }
+    }
+    // if not busy serve next request
+    if (con->response == NULL && con->file == -1) {
+        char* request = next_request(&con->request);
+        if (request == 0) {
+            if (eof) {
+                destroy(&con->request);
+                if (close(con->tcp) != 0) perror("close tcp");
+                con->tcp = -1;
+            }
         } else {
-            char* request = next_request(&con->request);
-            if (request == 0) {
-                if (r == 0) { // closed connection
-                    destroy(&con->request);
-                    if (close(con->tcp) != 0) perror("close tcp");
-                    con->tcp = -1;
+            char* i = request;
+            char* method = i; i = take_word(i);
+            char* path = i; i = take_word(i);
+            char* version = i; i = take_line(i);
+            if (!*method || !*path || !*version) {
+                error_respond(con, 400, "Bad Request", "Malformed Request Line");
+            } else if (strcmp(version, "HTTP/1.1") != 0) {
+                error_respond(con, 505, "HTTP Version Not Supported", 
+                        "Only HTTP/1.1 version is supported.");
+            } else if (strcmp(method, "GET") == 0) {
+                int filepath_size = strlen(base) + strlen(path) + 1;
+                char* filepath = (char*) malloc(filepath_size);
+                strcpy(filepath, base);
+                int r = unescapeURI(filepath + strlen(base), path, filepath_size - strlen(base));
+                if (r < 0) {
+                    perror("GET: unescapeURI");
+                    error_respond(con, 400, "Bad Request", "Malformed URI");
+                    return;
                 }
-            } else {
-                char* i = request;
-                char* method = i; i = take_word(i);
-                char* path = i; i = take_word(i);
-                char* version = i; i = take_line(i);
-                if (!*method || !*path || !*version) {
-                    error_respond(con, 400, "Bad Request", "Malformed Request Line");
-                } else if (strcmp(version, "HTTP/1.1") != 0) {
-                    error_respond(con, 505, "HTTP Version Not Supported", 
-                            "Only HTTP/1.1 version is supported.");
-                } else if (strcmp(method, "GET") == 0) {
-                    int filepath_size = strlen(base) + strlen(path) + 1;
-                    char* filepath = (char*) malloc(filepath_size);
-                    strcpy(filepath, base);
-                    int r = unescapeURI(filepath + strlen(base), path, filepath_size - strlen(base));
-                    if (r < 0) {
-                        error_respond(con, 400, "Bad Request", "Malformed URI");
-                        goto perror;
-                    }
-                    int source = open(filepath, O_RDONLY);
+                int source = open(filepath, O_RDONLY);
+                if (source == -1) {
+                    fprintf(stderr, "open path '%s' file '%s': %s\n", 
+                            path, filepath, strerror(errno));
+                    error_respond(con, 404, "Not Found", "Not Found");
+                    return;
+                }
+                struct stat stat;
+                r = fstat(source, &stat);
+                if (r == -1) {
+                    close(source);
+                    fprintf(stderr, "stat file '%s': '%s'\n", filepath, strerror(errno));
+                    error_respond(con, 500, "Internal Server Error", "Error");
+                    return;
+                }
+                // if is a directory, try index
+                if (S_ISDIR(stat.st_mode)) {
+                    int dir = source;
+                    source = openat(dir, index_file, O_RDONLY);
+                    close(dir);
                     if (source == -1) {
-                        error_respond(con, 404, "Not Found", "Not Found");
-                        goto perror;
+                        fprintf(stderr, "open index, path '%s' directory '%s' file '%s': %s\n", 
+                                path, filepath, index_file, strerror(errno));
+                        error_respond(con, 404, "Not Found", "Index Not Found");
+                        return;
                     }
-                    struct stat stat;
-                    r = fstat(source, &stat);
-                    if (r == -1) {
+                    if (fstat(source, &stat) == -1) {
+                        close(source);
+                        fprintf(stderr, "stat index directory '%s' file '%s': %s\n", 
+                                filepath, index_file, strerror(errno));
                         error_respond(con, 500, "Internal Server Error", "Error");
-                        goto perror;
+                        return;
                     }
-                    // if is a directory, try index
-                    if (S_ISDIR(stat.st_mode)) {
-                        int source = openat(source, index_file, O_RDONLY);
-                        if (source == -1) {
-                            error_respond(con, 404, "Not Found", "Index Not Found");
-                            goto perror;
-                        }
-                        if (fstat(source, &stat) == -1) {
-                            error_respond(con, 500, "Internal Server Error", "Error");
-                            goto perror;
-                        }
-                    }
-                    if (!S_ISREG(stat.st_mode)) {
-                        error_respond(con, 404, "Not Found", "Not a Regular File");
-                        goto error;
-                    }
-                    // TODO better content type?
-                    respond(con, 200, "OK", "text/html", stat.st_size, "");
-                    con->file = source;
-                    con->file_written = 0;
-                    con->file_size = stat.st_mode;
-                    perror:
-                    perror("GET");
-                    error:
-                    ;
-                } else if (strcmp(method, "OPTIONS") == 0) {
-                    respond(con, 200, "OK", "text/plain", 0, "");
-                } else {
-                    error_respond(con, 501, "Not Implemented", "Method not Implemented");
                 }
+                if (!S_ISREG(stat.st_mode)) {
+                    close(source);
+                    fprintf(stderr, "not a regular file: %s\n", filepath);
+                    error_respond(con, 404, "Not Found", "Not a Regular File");
+                    return;
+                }
+                // TODO better content type?
+                respond(con, 200, "OK", "text/html", stat.st_size, "");
+                con->file = source;
+                con->file_written = 0;
+                con->file_size = stat.st_size;
+            } else if (strcmp(method, "OPTIONS") == 0) {
+                respond(con, 200, "OK", "text/plain", 0, "");
+            } else {
+                fprintf(stderr, "Method: %s", method);
+                error_respond(con, 501, "Not Implemented", "Method not Implemented");
             }
         }
     }
@@ -277,7 +292,7 @@ int main() {
     int http4 = checked(socket(AF_INET, SOCK_STREAM, 0));
     struct sockaddr_in sin;
     sin.sin_family = AF_INET;
-    sin.sin_port = htons(8088); // TODO 80 ???
+    sin.sin_port = htons(80);
     sin.sin_addr.s_addr = INADDR_ANY;
     checked(bind(http4, (struct sockaddr*) &sin, sizeof(sin)));
     checked(listen(http4, 352));
