@@ -73,7 +73,7 @@ static void fillfds(connection* con, struct pollfd* fds) {
     }
 }
 
-static const char* base = "/var/www/";
+static const char* base = "/var/www";
 static const char* index_file = "index.html";
 
 static char* now() {
@@ -223,19 +223,21 @@ static void work(connection* con) {
                 error_respond(con, 505, "HTTP Version Not Supported", 
                         "Only HTTP/1.1 version is supported.");
             } else if (strcmp(method, "GET") == 0) {
-                int filepath_size = strlen(base) + strlen(path) + 1;
+                // TODO unescape in place
+                int filepath_size = strlen(path) + 1;
                 char* filepath = (char*) malloc(filepath_size);
-                strcpy(filepath, base);
-                int r = unescapeURI(filepath + strlen(base), path, filepath_size - strlen(base));
+                int r = unescapeURI(filepath, path, filepath_size);
                 if (r < 0) {
+                    free(filepath);
                     perror("GET: unescapeURI");
                     error_respond(con, 400, "Bad Request", "Malformed URI");
                     return;
                 }
                 int source = open(filepath, O_RDONLY);
                 if (source == -1) {
-                    fprintf(stderr, "open path '%s' file '%s': %s\n", 
-                            path, filepath, strerror(errno));
+                    fprintf(stderr, "open path '%s' file '%s/%s': %s\n",
+                            path, base, filepath, strerror(errno));
+                    free(filepath);
                     error_respond(con, 404, "Not Found", "Not Found");
                     return;
                 }
@@ -243,7 +245,9 @@ static void work(connection* con) {
                 r = fstat(source, &stat);
                 if (r == -1) {
                     close(source);
-                    fprintf(stderr, "stat file '%s': '%s'\n", filepath, strerror(errno));
+                    fprintf(stderr, "stat file '%s/%s': '%s'\n", 
+                            base, filepath, strerror(errno));
+                    free(filepath);
                     error_respond(con, 500, "Internal Server Error", "Error");
                     return;
                 }
@@ -253,25 +257,29 @@ static void work(connection* con) {
                     source = openat(dir, index_file, O_RDONLY);
                     close(dir);
                     if (source == -1) {
-                        fprintf(stderr, "open index, path '%s' directory '%s' file '%s': %s\n", 
-                                path, filepath, index_file, strerror(errno));
+                        fprintf(stderr, "open index, path '%s' file '%s/%s%s': %s\n",
+                                path, base, filepath, index_file, strerror(errno));
+                        free(filepath);
                         error_respond(con, 404, "Not Found", "Index Not Found");
                         return;
                     }
                     if (fstat(source, &stat) == -1) {
+                        fprintf(stderr, "stat index, path '%s' file '%s/%s/%s': %s\n",
+                                path, base, filepath, index_file, strerror(errno));
                         close(source);
-                        fprintf(stderr, "stat index directory '%s' file '%s': %s\n", 
-                                filepath, index_file, strerror(errno));
+                        free(filepath);
                         error_respond(con, 500, "Internal Server Error", "Error");
                         return;
                     }
                 }
                 if (!S_ISREG(stat.st_mode)) {
                     close(source);
-                    fprintf(stderr, "not a regular file: %s\n", filepath);
+                    fprintf(stderr, "not a regular file: path '%s'\n", path);
+                    free(filepath);
                     error_respond(con, 404, "Not Found", "Not a Regular File");
                     return;
                 }
+                free(filepath);
                 // TODO better content type?
                 respond(con, 200, "OK", "text/html", stat.st_size, "");
                 con->file = source;
@@ -289,6 +297,10 @@ static void work(connection* con) {
 
 // TODO add the NOBLOCK flags to all fds
 int main() {
+    // chroot to base directory
+    checked(chdir(base));
+    checked(chroot(base));
+    // listen
     int http4 = checked(socket(AF_INET, SOCK_STREAM, 0));
     struct sockaddr_in sin;
     sin.sin_family = AF_INET;
@@ -296,11 +308,13 @@ int main() {
     sin.sin_addr.s_addr = INADDR_ANY;
     checked(bind(http4, (struct sockaddr*) &sin, sizeof(sin)));
     checked(listen(http4, 352));
+    // initialize structs
     const int connection_count = 28;
     connection cs[connection_count];
     for (int i = 0; i != connection_count; i++) {
         connection_init(cs + i);
     }
+    // serve
     while (1) {
         struct pollfd fds[connection_count*2];
         int ai = -1;
