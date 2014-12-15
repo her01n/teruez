@@ -1,4 +1,29 @@
+#include <assert.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
 #include "buffer.h"
+
+static const int max_size = 64*1024;
+
+static void check_invariants(buffer* buffer) {
+    if (buffer->data == NULL) {
+        assert(buffer->allocated == 0);
+    } else {
+        assert(buffer->allocated > 0);
+    }
+    assert(buffer->offset >= 0);
+    assert(buffer->offset <= buffer->allocated);
+    assert(buffer->size >= 0);
+    assert(buffer->size <= max_size);
+    assert(buffer->offset + buffer->size <= buffer->allocated);
+    assert(buffer->parsed >= 0);
+    assert(buffer->parsed <= buffer->size);
+    assert(buffer->delim >= 0);
+    assert(buffer->delim < 4);
+}
 
 buffer create_buffer() {
     buffer buffer;
@@ -12,25 +37,7 @@ buffer create_buffer() {
     return buffer;
 }
 
-static void check_invariants(buffer* buffer) {
-    if (buffer->data == NULL) {
-        assert(buffer->allocated == 0);
-    } else {
-        assert(buffer->allocated > 0);
-    }
-    assert(buffer->offset >= 0);
-    assert(buffer->offset <= buffer->allocated);
-    assert(buffer->size >= 0);
-    assert(buffer->offset + buffer->size <= buffer->allocated);
-    assert(buffer->parsed >= 0);
-    assert(buffer->parsed <= buffer->size);
-    assert(buffer->delim >= 0);
-    assert(buffer->delim < 4);
-}
-
-static const int max_size = 64*1024;
-
-int copy(struct buffer* buffer, int fd) {
+int copy(buffer* buffer, int fd) {
     assert(buffer->size + buffer->offset <= buffer->allocated);
     if (buffer->size + buffer->offset == buffer->allocated) {
         if (buffer->offset != 0) {
@@ -52,8 +59,8 @@ int copy(struct buffer* buffer, int fd) {
         }
     }
     check_invariants(buffer);
-    int read = buffer->size + buffer->offset;
-    int r = read(fd, buffer->data + read, buffer->allocated - read);
+    int read_index = buffer->size + buffer->offset;
+    int r = read(fd, buffer->data + read_index, buffer->allocated - read_index);
     if (r < 0) return -1;
     buffer->size += r;
     check_invariants(buffer);

@@ -4,7 +4,7 @@
 typedef struct {
     char* data;
     int allocated;
-    int current;
+    int offset;
     int size;
     int parsed;
     int delim;

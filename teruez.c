@@ -1,5 +1,18 @@
-#include <netinet.h/ip.h>
+#include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/ip.h>
+#include <poll.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/sendfile.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "buffer.h"
 #include "check.h"
@@ -20,8 +33,7 @@ typedef struct { // connection
 
 static void connection_init(connection* con) {
     con->tcp = -1;
-    con->request = NULL;
-    con->response = NULL;
+    con->response = 0;
     con->response_written = 0;
     con->response_size = 0;
     con->file = -1;
@@ -33,18 +45,21 @@ static void connection_accept(connection* con, int tcp) {
     assert(con->tcp == -1);
     con->tcp = tcp;
     con->request = create_buffer();
-    assert(con->response == NULL);
+    assert(con->response == 0);
     assert(con->file == -1);
 }
 
 static void fillfds(connection* con, struct pollfd* fds) {
     if (con->tcp == -1) { // nothing to do
         fds[0].fd = -1;
+        fds[0].events = 0;
         fds[1].fd = -1;
-    } else if (con->response != NULL) { // send out reposonse
+        fds[1].events = 0;
+    } else if (con->response != 0) { // send out reposonse
         fds[0].fd = con->tcp;
         fds[0].events = POLLOUT;
         fds[1].fd = -1;
+        fds[1].events = 0;
     } else if (con->file != -1) { // send out content
         fds[0].fd = con->tcp;
         fds[0].events = POLLOUT;
@@ -54,45 +69,76 @@ static void fillfds(connection* con, struct pollfd* fds) {
         fds[0].fd = con->tcp;
         fds[0].events = POLLIN;
         fds[1].fd = -1;
+        fds[1].events = 0;
     }
 }
 
-static const char* base = "/var/www/";
-static const char* index = "index.html";
+static const char* base = "/var/www/html/";
+static const char* index_file = "index.html";
 
 static char* now() {
-    static char[256] buf;
-    int r = strftime(buf, 256, "%a, %d %b %Y %H:%M:%S %Z", localtime(time(NULL)));
+    static char buf[256];
+    time_t now = time(0);
+    int r = strftime(buf, 256, "%a, %d %b %Y %H:%M:%S %Z", localtime(&now));
     assert(r > 0);
     return buf;
 }
 
-static void response(connection *con, int code, char* response, 
+static void respond(connection *con, int code, char* response, 
         char* content_type, int content_length, char* content) {
-    int response_size = 501;
-    char* response = (char*) malloc(response_size);
-    snprintf(response, response_size, 
-            "200 HTTP/1.1 OK\r\n" +
-            "Date: %s\r\n" +
-            "Server: Teruez/1\r\n" +
-            "Content-Type: %s\r\n" +
-            "Content-Length: %d\r\n" +
-            "Connection: keep\r\n" +
-            "\r\n%s", now(), 
+    int buffer_size = 777;
+    char* buffer = (char*) malloc(buffer_size);
+    int response_size = snprintf(buffer, buffer_size, 
+            "%d HTTP/1.1 %s\r\n"
+            "Date: %s\r\n"
+            "Server: Teruez/1\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: keep\r\n"
+            "\r\n%s", code, response, now(), 
             content_type, content_length, content);
-    con->response = response;
+    if (response_size > buffer_size) {
+        assert(0);
+        response_size = buffer_size;
+    }
+    con->response = buffer;
     con->response_written = 0;
-    con->response_size = strlen(response);
+    con->response_size = response_size;
 }
 
-static void error_response(connection* con, int code, char* response, char* content) {
-    response(con, code, response, "text/plain", strlen(content), content);
+static void error_respond(connection* con, int code, char* response, char* content) {
+    fprintf(stderr, "Error, tcp socket: %d\n", con->tcp);
+    fprintf(stderr, "Sending %d %s\n%s\n", code, response, content);
+    respond(con, code, response, "text/plain", strlen(content), content);
+}
+
+static void error_reset(connection* con, char* format, ...) {
+    va_list arglist;
+    // TODO log client address
+    fprintf(stderr, "Error, tcp socket: %d\n", con->tcp);
+    va_start(arglist, format);
+    vfprintf(stderr, format, arglist);
+    va_end(arglist);
+    fprintf(stderr, "Closing connection\n");
+    close(con->tcp);
+    con->tcp = -1;
+    destroy(&con->request);
+    free(con->response);
+    con->response = 0;
+    con->response_written = 0;
+    con->response_size = 0;
+    if (con->file != -1) {
+        if (close(con->file) != 0) perror("close input file");
+    }
+    con->file = -1;
+    con->file_written = 0;
+    con->file_size = 0;
 }
 
 static char* take_word(char* src) {
     while (*src) {
         if (*src == ' ' || *src == '\t') {
-            while (*src && (*src == ' ' || *src = '\t')) {
+            while (*src && (*src == ' ' || *src == '\t')) {
                 *src = 0;
                 src++;
             }
@@ -123,13 +169,14 @@ static void work(connection* con) {
     } else if (con->response != NULL) {
         int r = write(con->tcp, 
                 con->response + con->response_written, 
-                con->size - con->response_written);
+                con->response_size - con->response_written);
         if (r < 0) {
             error_reset(con, "Failed sending response %s\n", strerror(errno));
         } else {
             con->response_written += r;
             if (con->response_written == con->response_size) {
                 free(con->response);
+                con->response = 0;
                 con->response_written = 0;
                 con->response_size = 0;
             }
@@ -148,120 +195,94 @@ static void work(connection* con) {
             }
         }
     } else {
-        int r = copy(&con->buffer, con->tcp);
+        // TODO what if i have more than one request read at once?
+        int r = copy(&con->request, con->tcp);
         if (r < 0) {
             error_reset(con, "Failed to read request %s\n", strerror(errno));
         } else {
-            char* request = read_request(&con->buffer);
-            if (request == null) {
+            char* request = next_request(&con->request);
+            if (request == 0) {
                 if (r == 0) { // closed connection
-                    destroy(&con->buffer);
-                    con->buffer = NULL;
-                    close(con->tcp) || perror("close tcp");
+                    destroy(&con->request);
+                    if (close(con->tcp) != 0) perror("close tcp");
                     con->tcp = -1;
                 }
             } else {
-                char* i = requst;
+                char* i = request;
                 char* method = i; i = take_word(i);
-                char* path = i; i = take_work(i);
+                char* path = i; i = take_word(i);
                 char* version = i; i = take_line(i);
                 if (!*method || !*path || !*version) {
-                    error_response(con, 400, "Bad Request", "Malformed Request Line");
+                    error_respond(con, 400, "Bad Request", "Malformed Request Line");
                 } else if (strcmp(version, "HTTP/1.1") != 0) {
-                    error_response(con, 505, "HTTP Version Not Supported", 
+                    error_respond(con, 505, "HTTP Version Not Supported", 
                             "Only HTTP/1.1 version is supported.");
                 } else if (strcmp(method, "GET") == 0) {
                     int filepath_size = strlen(base) + strlen(path) + 1;
                     char* filepath = (char*) malloc(filepath_size);
                     strcpy(filepath, base);
-                    int r = unescapeURI(base + strlen(base), path, end - i);
+                    int r = unescapeURI(filepath + strlen(base), path, filepath_size - strlen(base));
                     if (r < 0) {
-                        error_response(con, 400, "Bad Request", "Malformed URI");
+                        error_respond(con, 400, "Bad Request", "Malformed URI");
                         goto perror;
                     }
                     int source = open(filepath, O_RDONLY);
                     if (source == -1) {
-                        error_response(con, 404, "Not Found", "Not Found");
+                        error_respond(con, 404, "Not Found", "Not Found");
                         goto perror;
                     }
-                    struct stat;
-                    int r = fstat(source, &stat);
+                    struct stat stat;
+                    r = fstat(source, &stat);
                     if (r == -1) {
-                        error_response(con, 500, "Internal Server Error", "Error");
+                        error_respond(con, 500, "Internal Server Error", "Error");
                         goto perror;
                     }
                     // if is a directory, try index
                     if (S_ISDIR(stat.st_mode)) {
-                        int source = openat(source, index, O_RDONLY);
+                        int source = openat(source, index_file, O_RDONLY);
                         if (source == -1) {
-                            error_response(con, 404, "Not Found", "Index Not Found");
+                            error_respond(con, 404, "Not Found", "Index Not Found");
                             goto perror;
                         }
                         if (fstat(source, &stat) == -1) {
-                            error_response(con, 500, "Internal Server Error", "Error");
+                            error_respond(con, 500, "Internal Server Error", "Error");
                             goto perror;
                         }
                     }
                     if (!S_ISREG(stat.st_mode)) {
-                        error_response(con, 404, "Not Found", "Not a Regular File");
+                        error_respond(con, 404, "Not Found", "Not a Regular File");
                         goto error;
                     }
                     // TODO better content type?
-                    response(con, 200, "OK", "text/html", stat.st_size, "");
+                    respond(con, 200, "OK", "text/html", stat.st_size, "");
                     con->file = source;
                     con->file_written = 0;
                     con->file_size = stat.st_mode;
                     perror:
                     perror("GET");
                     error:
+                    ;
                 } else if (strcmp(method, "OPTIONS") == 0) {
-                    int response_size = 501;
-                    char* response = (char*) malloc(response_size);
-                    snprintf(response, response_size,
-                            "200 HTTP/1.1 OK\r\n" +
-                            "Date: %s\r\n" +
-                            "Server: Teruez/1\r\n" +
-                            "Connection: keep\r\n" +
-                            "\r\n", now());
-                    con->response = response;
-                    con->response_written = 0;
-                    con->response_sizse = strlen(response);
+                    respond(con, 200, "OK", "text/plain", 0, "");
                 } else {
-                    error_response(con, 501, "Not Implemented", "Method not Implemented");
+                    error_respond(con, 501, "Not Implemented", "Method not Implemented");
                 }
             }
         }
     }
 }
 
-/**
- * Error resolved by closing socket
- */
-static void error_reset(connection* con, char* format, ...) {
-    va_list arglist;
-    // TODO log client address
-    fprintf(stderr, "Error, tcp socket: %d\n", con->tcp);
-    va_start(arglist, format);
-    vfprintf(stderr, format, arglist);
-    va_end(arglist);
-    fprintf(stderr, "Closing connection\n");
-    // TODO reset method?
-    close(con->tcp);
-    con->tcp = -1;
-    destroy(&con->buffer);
-}
-
 // TODO add the NOBLOCK flags to all fds
 int main() {
-    int http4 = _(socket(AF_INET, SOCKET_STREAM, 0), "socket");
+    int http4 = checked(socket(AF_INET, SOCK_STREAM, 0));
     struct sockaddr_in sin;
-    sin.sin_familly = AF_INET;
-    sin.sin_port = htons(80);
-    sin.sin_addr = INADDR_ANY;
-    checked(bind(http4, &sin, sizeof(sin)));
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(8088); // TODO 80 ???
+    sin.sin_addr.s_addr = INADDR_ANY;
+    checked(bind(http4, (struct sockaddr*) &sin, sizeof(sin)));
     checked(listen(http4, 352));
     const int connection_count = 28;
-    struct connection cs[connection_count];
+    connection cs[connection_count];
     for (int i = 0; i != connection_count; i++) {
         connection_init(cs + i);
     }
@@ -276,18 +297,25 @@ int main() {
                 fds[i*2].events = POLLIN;
             }
         }
-        checked(poll(fds, fdi, -1));
+        checked(poll(fds, connection_count*2, -1));
         for (int i = 0; i != connection_count; i++) {
             if (ai == i) {
-                struct sockaddr_in client_address;
-                int tcp = accept(http4, &client_address, sizeof(client_address));
-                if (tcp < 0) {
-                    perror("accept ip4 http tcp connection");
-                } else {
-                    connection_accept(cs + i, tcp);
+                if (fds[i*2].revents != 0) {
+                    struct sockaddr_in client_address;
+                    socklen_t addrlen = sizeof(client_address);
+                    int tcp = accept(http4, (struct sockaddr*) &client_address, &addrlen);
+                    if (tcp < 0) {
+                        perror("accept ip4 http tcp connection");
+                    } else {
+                        connection_accept(cs + i, tcp);
+                    }
                 }
             } else {
-                work(cs + i, fds + i*2);
+                if (fds[i*2].revents != 0) {
+                    if (fds[i*2 + 1].fd < 0 || fds[i*2 + 1].revents > 0) {
+                        work(cs + i);
+                    }
+                }
             }
         }
     }

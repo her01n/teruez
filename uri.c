@@ -1,6 +1,19 @@
+#include <assert.h>
 #include <errno.h>
 
 #include "uri.h"
+
+int fromHexDigit(char digit) {
+    if (digit >= '0' && digit <= '9') {
+        return digit - '0';
+    } else if (digit >= 'a' && digit <= 'f') {
+        return 10 + digit - 'a';
+    } else if (digit >= 'A' && digit <= 'F') {
+        return 10 + digit - 'A';
+    } else {
+        return -1;
+    }
+}
 
 int unescapeURI(char* dest, char* src, int size) {
     assert(size > 0);
