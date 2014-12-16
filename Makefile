@@ -1,9 +1,9 @@
 default: build/teruez
 
-CFLAGS=-g --std=c11
+CFLAGS=-g --std=c99
 
 build/teruez: build/buffer.o build/check.o build/teruez.o build/uri.o
-	gcc -g --std=c11 build/buffer.o build/check.o build/teruez.o build/uri.o -o build/teruez
+	gcc -g --std=c99 build/buffer.o build/check.o build/teruez.o build/uri.o -o build/teruez
 
 build/buffer.o: buffer.c buffer.h
 	mkdir -p build
