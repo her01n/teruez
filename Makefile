@@ -24,3 +24,8 @@ build/uri.o: uri.c uri.h
 clean:
 	rm -rf build
 
+install:
+	install build/teruez /usr/local/bin/teruez
+
+uninstall:
+	rm -rf /usr/local/bin/teruez
