@@ -234,6 +234,7 @@ static void work(connection* con) {
                     return;
                 }
                 int source = open(filepath, O_RDONLY);
+                const char* name = filepath;
                 if (source == -1) {
                     fprintf(stderr, "open path '%s' file '%s/%s': %s\n",
                             path, base, filepath, strerror(errno));
@@ -255,6 +256,7 @@ static void work(connection* con) {
                 if (S_ISDIR(stat.st_mode)) {
                     int dir = source;
                     source = openat(dir, index_file, O_RDONLY);
+                    name = index_file;
                     close(dir);
                     if (source == -1) {
                         fprintf(stderr, "open index, path '%s' file '%s/%s%s': %s\n",
@@ -279,9 +281,26 @@ static void work(connection* con) {
                     error_respond(con, 404, "Not Found", "Not a Regular File");
                     return;
                 }
+                // determine content type from the file name extension
+                const char* extension;
+                for (extension = name + strlen(name); extension > name; extension--) {
+                    char delimiter = extension[-1];
+                    if (delimiter == '.' || delimiter == '/') {
+                        break;
+                    }
+                }
+                char* content_type;
+                if (0 == strcmp("html", extension)) {
+                    content_type = "text/html";
+                } else if (0 == strcmp("txt", extension)) {
+                    content_type = "text/plain";
+                } else {
+                    content_type = "application/octet-stream";
+                }
+                extension = NULL;
+                name = NULL;
                 free(filepath);
-                // TODO better content type?
-                respond(con, 200, "OK", "text/html", stat.st_size, "");
+                respond(con, 200, "OK", content_type, stat.st_size, "");
                 con->file = source;
                 con->file_written = 0;
                 con->file_size = stat.st_size;
