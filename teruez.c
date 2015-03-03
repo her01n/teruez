@@ -223,22 +223,17 @@ static void work(connection* con) {
                 error_respond(con, 505, "HTTP Version Not Supported", 
                         "Only HTTP/1.1 version is supported.");
             } else if (strcmp(method, "GET") == 0) {
-                // TODO unescape in place
-                int filepath_size = strlen(path) + 1;
-                char* filepath = (char*) malloc(filepath_size);
-                int r = unescapeURI(filepath, path, filepath_size);
+                int r = unescapeURI(path);
                 if (r < 0) {
-                    free(filepath);
                     perror("GET: unescapeURI");
                     error_respond(con, 400, "Bad Request", "Malformed URI");
                     return;
                 }
-                int source = open(filepath, O_RDONLY);
-                const char* name = filepath;
+                int source = open(path, O_RDONLY);
+                const char* name = path;
                 if (source == -1) {
-                    fprintf(stderr, "open path '%s' file '%s/%s': %s\n",
-                            path, base, filepath, strerror(errno));
-                    free(filepath);
+                    fprintf(stderr, "open '%s/%s': %s\n",
+                            base, path, strerror(errno));
                     error_respond(con, 404, "Not Found", "Not Found");
                     return;
                 }
@@ -246,9 +241,8 @@ static void work(connection* con) {
                 r = fstat(source, &stat);
                 if (r == -1) {
                     close(source);
-                    fprintf(stderr, "stat file '%s/%s': '%s'\n", 
-                            base, filepath, strerror(errno));
-                    free(filepath);
+                    fprintf(stderr, "stat '%s/%s': '%s'\n", 
+                            base, path, strerror(errno));
                     error_respond(con, 500, "Internal Server Error", "Error");
                     return;
                 }
@@ -259,25 +253,22 @@ static void work(connection* con) {
                     name = index_file;
                     close(dir);
                     if (source == -1) {
-                        fprintf(stderr, "open index, path '%s' file '%s/%s%s': %s\n",
-                                path, base, filepath, index_file, strerror(errno));
-                        free(filepath);
+                        fprintf(stderr, "open index '%s/%s/%s': %s\n",
+                                base, path, index_file, strerror(errno));
                         error_respond(con, 404, "Not Found", "Index Not Found");
                         return;
                     }
                     if (fstat(source, &stat) == -1) {
-                        fprintf(stderr, "stat index, path '%s' file '%s/%s/%s': %s\n",
-                                path, base, filepath, index_file, strerror(errno));
+                        fprintf(stderr, "stat index '%s/%s/%s': %s\n",
+                                base, path, index_file, strerror(errno));
                         close(source);
-                        free(filepath);
                         error_respond(con, 500, "Internal Server Error", "Error");
                         return;
                     }
                 }
                 if (!S_ISREG(stat.st_mode)) {
                     close(source);
-                    fprintf(stderr, "not a regular file: path '%s'\n", path);
-                    free(filepath);
+                    fprintf(stderr, "not a regular file '%s'\n", path);
                     error_respond(con, 404, "Not Found", "Not a Regular File");
                     return;
                 }
@@ -299,7 +290,6 @@ static void work(connection* con) {
                 }
                 extension = NULL;
                 name = NULL;
-                free(filepath);
                 respond(con, 200, "OK", content_type, stat.st_size, "");
                 con->file = source;
                 con->file_written = 0;

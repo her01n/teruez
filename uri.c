@@ -15,18 +15,13 @@ int fromHexDigit(char digit) {
     }
 }
 
-int unescapeURI(char* dest, char* src, int size) {
-    assert(size > 0);
-    int i = 0;
+int unescapeURI(char* uri) {
+    char* src = uri;
+    char* dest = uri;
     while (*src) {
-        if (i == size) {
-            errno = ENOMEM;
-            return -1;
-        }
         if (*src == '%') {
             if (src[1] == 0 || src[2] == 0) {
-                errno = EINVAL;
-                return -1;
+                return EINVAL;
             }
             int ms = fromHexDigit(src[1]);
             int ls = fromHexDigit(src[2]);
@@ -34,15 +29,16 @@ int unescapeURI(char* dest, char* src, int size) {
                 errno = EINVAL;
                 return -1;
             }
-            dest[i] = ms*16 + ls;
+            *dest = ms*16 + ls;
+            dest++;
             src += 3;
         } else {
-            dest[i] = *src;
+            *dest = *src;
+            dest++;
             src++;
         }
-        i++;
     }
-    dest[i] = 0;
-    return i;
+    *dest = 0;
+    return 0;
 }
 
