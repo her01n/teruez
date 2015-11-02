@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+#define _BSD_SOURCE 1
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
