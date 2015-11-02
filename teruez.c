@@ -307,7 +307,11 @@ static void work(connection* con) {
 // TODO add the NOBLOCK flags to all fds
 int main() {
     // chroot to base directory
-    checked(chdir(base));
+    if (chdir(base) < 0) {
+        fprintf(stderr, "Failed to chdir to web base: %s\n", base);
+        perror(NULL);
+        abort();
+    }
     checked(chroot(base));
     // listen
     int http4 = checked(socket(AF_INET, SOCK_STREAM, 0));
@@ -323,6 +327,7 @@ int main() {
     for (int i = 0; i != connection_count; i++) {
         connection_init(cs + i);
     }
+    fprintf(stderr, "Serving %s on port %d.\n", base, 80);
     // serve
     while (1) {
         struct pollfd fds[connection_count*2];
