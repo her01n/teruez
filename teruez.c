@@ -91,7 +91,7 @@ static void respond(connection *con, int code, char* response,
     int buffer_size = 777;
     char* buffer = (char*) malloc(buffer_size);
     int response_size = snprintf(buffer, buffer_size, 
-            "%d HTTP/1.1 %s\r\n"
+            "HTTP/1.1 %d %s\r\n"
             "Date: %s\r\n"
             "Server: Teruez/1\r\n"
             "Content-Type: %s\r\n"
